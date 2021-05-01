@@ -23,63 +23,6 @@ Parameters:
     ConstraintDescription: must specify prod or test.
 
 Resources:
-  # Lambda function execution
-  ETLtransfer:
-    Type: Custom::ETLtransfer
-    Properties:
-      ServiceToken: !GetAtt [GithubtoS3LambdaFunction, Arn]
-
-  # Lambda function to copy ETL python files from Github to S3
-  GithubtoS3LambdaFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      Description: lambda function to host python files on S3
-      Environment:
-        Variables:
-          destinationbucket: !Ref 'GlueBucketName'
-      Code:
-         S3Bucket: !Ref 'GlueBucketName'
-         S3Key: gluelambda/myETLDeploymentPackage.zip
-      Handler: lambda_function.lambda_handler
-      Role: !GetAtt [LambdaExecutionRole, Arn]
-      Runtime: python3.8
-      Timeout: 300
-
-  # IAM role for lambda function 
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement: 
-        - Effect: Allow
-          Principal:
-            Service:
-            - lambda.amazonaws.com
-          Action:
-          - sts:AssumeRole
-      Path: /
-      ManagedPolicyArns:
-      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-      Policies:
-      - PolicyName: S3Permissions 
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action: 'S3:*'
-            Resource:
-              - !Join [ "", [ "arn:aws:s3:::",  !Ref 'GlueBucketName', "/*"] ]
-              - !Join [ "", [ "arn:aws:s3:::",  !Ref 'GlueBucketName' ] ]
-      - PolicyName: SecretsManagerPermissions 
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action: 'secretsmanager:*'
-            Resource:
-              - arn:aws:secretsmanager:eu-west-2:{AccountId}:secret:PROD/DATA-ETL-sz1kSk
-
   # AWS Glue Database table set for Main DB
   GlueStagingS3Database:
     Type: AWS::Glue::Database
