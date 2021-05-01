@@ -1,0 +1,573 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWSGlueETLTemplate
+Parameters:
+  GlueBucketName:
+    Type: String
+    Default: aws-glue-scripts-{AccountId}-eu-west-2
+  StagingDataBucketName:
+    Type: String
+    Default: staging-data-{AccountId}-eu-west-2
+  GlueSecrets:
+    Type: String
+    Default: arn:aws:secretsmanager:eu-west-2:{AccountId}:secret:PROD/GLUESECRETS-CRLmdQ
+  DBIdentifierRedshiftDW:
+    Type: String
+    Default: analytics-prod
+  EnvType:
+    Description: Environment type.
+    Default: test
+    Type: String
+    AllowedValues:
+    - prod
+    - test
+    ConstraintDescription: must specify prod or test.
+
+Resources:
+  # Lambda function execution
+  ETLtransfer:
+    Type: Custom::ETLtransfer
+    Properties:
+      ServiceToken: !GetAtt [GithubtoS3LambdaFunction, Arn]
+
+  # Lambda function to copy ETL python files from Github to S3
+  GithubtoS3LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: lambda function to host python files on S3
+      Environment:
+        Variables:
+          destinationbucket: !Ref 'GlueBucketName'
+      Code:
+         S3Bucket: !Ref 'GlueBucketName'
+         S3Key: gluelambda/myETLDeploymentPackage.zip
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt [LambdaExecutionRole, Arn]
+      Runtime: python3.8
+      Timeout: 300
+
+  # IAM role for lambda function 
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: 
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName: S3Permissions 
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: 'S3:*'
+            Resource:
+              - !Join [ "", [ "arn:aws:s3:::",  !Ref 'GlueBucketName', "/*"] ]
+              - !Join [ "", [ "arn:aws:s3:::",  !Ref 'GlueBucketName' ] ]
+      - PolicyName: SecretsManagerPermissions 
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: 'secretsmanager:*'
+            Resource:
+              - arn:aws:secretsmanager:eu-west-2:{AccountId}:secret:PROD/DATA-ETL-sz1kSk
+
+  # AWS Glue Database table set for Main DB
+  GlueStagingS3Database:
+    Type: AWS::Glue::Database
+    Properties: 
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Join [ "", [ gluestagings3 , !Ref 'EnvType' , database ] ]
+        Description: Glue database for data from staging - S3 Crawler
+
+  # AWS Glue Database table set for Main DB
+  GlueSourceMainDBDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Join [ "", [gluesourcemaindb , !Ref 'EnvType' , database ] ]
+        Description: Glue database for data from source - MainDB Crawler
+
+  # AWS Glue Database table set for Redshift
+  GlueDestinationRedshiftDWDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput: 
+        Name: !Join [ "", [gluedestinationredshiftdw , !Ref 'EnvType' , database ] ]
+        Description: Glue database for data from destination - Redshift Crawler
+
+  # AWS Glue network connection set for S3
+  GlueStagingS3Connection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionType: NETWORK
+        PhysicalConnectionRequirements:
+          AvailabilityZone: 'eu-west-2b'
+          SecurityGroupIdList: 
+            - "{SecurityGroupId}"
+          SubnetId: '{SubnetId}'
+        Description: Connection to s3 staging data bucket
+        Name: GlueStagingS3Connection
+
+  # AWS Glue DB connection set for Main DB
+  GlueSourceMainDBConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionType: JDBC
+        ConnectionProperties: {
+          "JDBC_CONNECTION_URL": {JdbcConnectionUrl - Source},
+          "USERNAME": !Join ['', ['{{resolve:secretsmanager:', !Ref GlueSecrets, ':SecretString:DB_USER_MAINDB}}' ] ] ,
+          "PASSWORD": !Join ['', ['{{resolve:secretsmanager:', !Ref GlueSecrets, ':SecretString:DB_PASSWORD_MAINDB}}' ] ] 
+        }
+        PhysicalConnectionRequirements:
+          AvailabilityZone: 'eu-west-2b'
+          SecurityGroupIdList: 
+            - "{SecurityGroupId}"
+          SubnetId: '{SubnetId}'
+        Description: Connection to main database
+        Name: GlueSourceMainDBConnection
+
+  # AWS Glue DB connection set for Redshift Data Warehouse
+  GlueRedshiftConnection:
+      Type: AWS::Glue::Connection
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        ConnectionInput:
+          ConnectionType: JDBC
+          ConnectionProperties: {
+            "JDBC_CONNECTION_URL": {JdbcConnectionUrl - Destination},
+            "USERNAME": !Join ['', ['{{resolve:secretsmanager:', !Ref GlueSecrets, ':SecretString:DB_USER_REDSHIFTDW}}' ] ] , 
+            "PASSWORD": !Join ['', ['{{resolve:secretsmanager:', !Ref GlueSecrets, ':SecretString:DB_PASSWORD_REDSHIFTDW}}' ] ]
+          }
+          PhysicalConnectionRequirements:
+            AvailabilityZone: 'eu-west-2b'
+            SecurityGroupIdList: 
+              - "{SecurityGroupId}"
+            SubnetId: '{SubnetId}'
+          Description: Connection to Redshift data warehouse
+          Name: GlueRedshiftConnection
+
+  # IAM Role for AWS Glue Crawler
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    DependsOn: ETLtransfer
+    Properties: 
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonVPCReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEventBridgeFullAccess
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - glue.amazonaws.com
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: / 
+
+  # AWS Glue Crawler for S3 raw bucket
+  GlueStagingS3Crawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: GlueServiceRole
+    Properties:
+      DatabaseName: !Ref GlueStagingS3Database
+      Description: Crawler for staging - S3 bucket
+      Role: !GetAtt GlueServiceRole.Arn
+      Name: !Join [ "", [ GlueStagingS3 , !Ref 'EnvType' , Crawler ] ]
+      Targets:
+        S3Targets:
+          - ConnectionName: !Ref GlueStagingS3Connection
+            Path: !Join [ "/", [ "s3:/", !Ref 'StagingDataBucketName' , datalake , !Ref 'EnvType' , !Ref 'GlueSourceMainDBDatabase', users ] ]
+          - ConnectionName: !Ref GlueStagingS3Connection
+            Path: !Join [ "/", [ "s3:/", !Ref 'StagingDataBucketName' , datalake , !Ref 'EnvType' , !Ref 'GlueSourceMainDBDatabase', interests ] ]
+      TablePrefix: !Join [ "", [ !Ref 'EnvType' , '_' ] ] 
+
+  # AWS Glue Crawler for Main DB
+  GlueSourceMainDBCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: GlueServiceRole
+    Properties:
+      DatabaseName: !Ref GlueSourceMainDBDatabase
+      Description: Crawler for source - main database tables
+      Role: !GetAtt GlueServiceRole.Arn
+      Name: GlueSourceMainDBCrawler
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueSourceMainDBConnection
+            Path: database_name/%
+      TablePrefix: !Join [ "", [ !Ref 'EnvType' , '_' ] ] 
+
+  # AWS Glue Crawler for Redshift Data warehouse
+  GlueDestinationRedshiftDWCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: GlueServiceRole
+    Properties:
+      DatabaseName: !Ref GlueDestinationRedshiftDWDatabase
+      Description: Crawler for destination - redshift data warehouse tables
+      Role: !GetAtt GlueServiceRole.Arn
+      Name: GlueDestinationRedshiftDWCrawler
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueRedshiftConnection
+            Path: !Join [ "/", [!Ref 'DBIdentifierRedshiftDW' , !Ref 'EnvType' , '%' ] ] 
+      TablePrefix: !Join [ "", [ !Ref 'EnvType' , '_' ] ] 
+
+  # AWS Glue security configuration
+  GlueSecurityConfiguration:
+    Type: AWS::Glue::SecurityConfiguration
+    Properties:
+      EncryptionConfiguration:
+        S3Encryptions:
+          - KmsKeyArn: arn:aws:kms:eu-west-2:{AccountId}:key/edfbdaa1-5368-469f-b5c9-2f3425c14fdc
+            S3EncryptionMode: SSE-KMS
+      Name: GlueSecurityConfiguration
+
+  ############################################
+  ######## ETL Workflow scripts  #############
+  ############################################
+
+  GlueJobETLWorklfowStart:
+    Type: AWS::Glue::Job
+    DependsOn: GlueServiceRole
+    Properties:
+      Role: !Ref GlueServiceRole
+      Name: GlueJobETLWorklfowStart
+      MaxRetries: 3
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      DefaultArguments:
+        "--LOG_LEVEL": "INFO"
+        "--job-bookmark-option": "job-bookmark-disable"
+      Description: Glue Job for Workflow start
+      Command:
+        Name: pythonshell
+        PythonVersion: "3"
+        ScriptLocation: !Join [ "/", [ "s3:/", !Ref 'GlueBucketName' , gluescripts/etl_workflow_start.py ] ]  
+  
+  GlueJobETLWorkflowEnd:
+    Type: AWS::Glue::Job
+    DependsOn: GlueServiceRole
+    Properties:
+      Role: !Ref GlueServiceRole
+      Name: GlueJobETLWorkflowEnd
+      MaxRetries: 3
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      DefaultArguments:
+        "--LOG_LEVEL": "INFO"
+        "--job-bookmark-option": "job-bookmark-disable"
+      Description: Glue Job for Workflow end
+      Command:
+        Name: pythonshell
+        PythonVersion: "3"
+        ScriptLocation: !Join [ "/", [ "s3:/", !Ref 'GlueBucketName' , gluescripts/etl_workflow_end.py ] ]
+
+
+  ############################################
+  ######## source - to - staging  ###########
+  ############################################
+
+  # AWS Glue job for Redshift table: Users
+  GlueJobSourceStagingUsers:
+    Type: AWS::Glue::Job
+    DependsOn: GlueServiceRole
+    Properties:
+      Role: !Ref GlueServiceRole
+      Name: GlueJobSourceStagingUsers
+      GlueVersion: 2.0
+      AllocatedCapacity: 4
+      SecurityConfiguration: !Ref GlueSecurityConfiguration
+      DefaultArguments:
+        "--TempDir" : !Join [ "/", [ "s3:/", !Ref 'GlueBucketName', temp/ ] ]
+        "--environment" : !Ref 'EnvType'
+        "--region" : !Ref AWS::Region
+        "--sourcedatabase" : !Ref GlueSourceMainDBDatabase
+        "--sourcetable" : !Join [ "_", [ !Ref 'EnvType' , database_name , users ] ]
+        "--destinationpath" : !Join [ "/", [ "s3:/", !Ref 'StagingDataBucketName' , datalake ] ]
+        "--rawbucket" : !Ref 'StagingDataBucketName'
+        "--job-bookmark-option": job-bookmark-disable
+        "--enable-metrics" : ""
+        "--enable-continuous-cloudwatch-log": true
+        "--enable-continuous-log-filter": true
+        "--enable-s3-parquet-optimized-committer": true
+      Description: AWS Glue job for S3 staging data - Users
+      Connections:
+        Connections:
+          - GlueSourceMainDBConnection
+          - GlueStagingS3Connection
+      Command:
+        Name: glueetl
+        ScriptLocation: !Join [ "/", [ "s3:/", !Ref 'GlueBucketName' , gluescripts/etl_source_raw_users.py ] ]
+
+  # AWS Glue job for Redshift table: Interests
+  GlueJobSourceStagingInterests:
+      Type: AWS::Glue::Job
+      DependsOn: GlueServiceRole
+      Properties:
+        Role: !Ref GlueServiceRole
+        Name: GlueJobSourceStagingInterests
+        GlueVersion: 2.0
+        AllocatedCapacity: 4
+        SecurityConfiguration: !Ref GlueSecurityConfiguration
+        DefaultArguments:
+          "--TempDir" : !Join [ "/", [ "s3:/", !Ref 'GlueBucketName', temp/ ] ]
+          "--environment" : !Ref 'EnvType'
+          "--region" : !Ref AWS::Region
+          "--sourcedatabase" : !Ref GlueSourceMainDBDatabase
+          "--sourcetable" : !Join [ "_", [ !Ref 'EnvType' , database_name , user_interests ] ]
+          "--destinationpath" : !Join [ "/", [ "s3:/", !Ref 'StagingDataBucketName' , datalake ] ]
+          "--rawbucket" : !Ref 'StagingDataBucketName'
+          "--job-bookmark-option": job-bookmark-disable
+          "--enable-metrics" : ""
+          "--enable-continuous-cloudwatch-log": true
+          "--enable-continuous-log-filter": true
+          "--enable-s3-parquet-optimized-committer": true
+        Description: AWS Glue job for S3 staging data - Groups
+        Connections:
+          Connections:
+            - GlueSourceMainDBConnection
+            - GlueStagingS3Connection
+        Command:
+          Name: glueetl
+          ScriptLocation: !Join [ "/", [ "s3:/", !Ref 'GlueBucketName' , gluescripts/etl_source_staging_interests.py ] ]
+
+
+  ############################################
+  ###### Staging  - to - Redshift  ###########
+  ############################################
+
+
+  # AWS Glue job for Redshift table: Users
+  GlueJobStagingWarehouseUsers:
+    Type: AWS::Glue::Job
+    DependsOn: GlueServiceRole
+    Properties:
+      Role: !Ref GlueServiceRole
+      Name: GlueJobStagingWarehouseUsers
+      GlueVersion: 2.0
+      AllocatedCapacity: 10
+      SecurityConfiguration: !Ref GlueSecurityConfiguration
+      DefaultArguments:
+        "--TempDir" : !Join [ "/", [ "s3:/", !Ref 'GlueBucketName', temp ] ]
+        "--environment" : !Ref 'EnvType'
+        "--region" : !Ref AWS::Region
+        "--sourcedatabase" : !Ref GlueStagingS3Database
+        "--sourcetable" : !Join [ "_", [ !Ref 'EnvType' , users ] ]
+        "--job-bookmark-option": job-bookmark-disable
+        "--enable-metrics" : ""
+        "--enable-continuous-cloudwatch-log": true
+        "--enable-continuous-log-filter": true
+        "--enable-s3-parquet-optimized-committer": true
+      Description: AWS Glue job for warehouse data - Users
+      Connections:
+        Connections:
+          - GlueRedshiftConnection
+          - GlueStagingS3Connection
+      Command:
+        Name: glueetl
+        ScriptLocation: !Join [ "/", [ "s3:/", !Ref 'GlueBucketName' , gluescripts/etl_staging_warehouse_users.py ] ]
+
+
+  # AWS Glue job for Redshift table: Interests
+  GlueJobStagingWarehouseInterests:
+    Type: AWS::Glue::Job
+    DependsOn: GlueServiceRole
+    Properties:
+      Role: !Ref GlueServiceRole
+      Name: GlueJobStagingWarehouseInterests
+      GlueVersion: 2.0
+      AllocatedCapacity: 4
+      SecurityConfiguration: !Ref GlueSecurityConfiguration
+      DefaultArguments:
+        "--TempDir" : !Join [ "/", [ "s3:/", !Ref 'GlueBucketName', temp ] ]
+        "--environment" : !Ref 'EnvType'
+        "--region" : !Ref AWS::Region
+        "--sourcedatabase" : !Ref GlueStagingS3Database
+        "--sourcetable" : !Join [ "_", [ !Ref 'EnvType' , interests ] ]
+        "--job-bookmark-option": job-bookmark-disable
+        "--enable-metrics" : ""
+        "--enable-continuous-cloudwatch-log": true
+        "--enable-continuous-log-filter": true
+        "--enable-s3-parquet-optimized-committer": true
+      Description: AWS Glue job for warehouse data - Interests
+      Connections:
+        Connections:
+          - GlueRedshiftConnection
+          - GlueStagingS3Connection
+      Command:
+        Name: glueetl
+        ScriptLocation: !Join [ "/", [ "s3:/", !Ref 'GlueBucketName' , gluescripts/etl_staging_warehouse_interests.py ] ]
+
+
+  ###########################################
+  ########## Workflow Settings ##############
+  ###########################################
+
+  # AWS GLue ETL Workflow for job triggers
+  GlueETLWorkflow:
+    Type: AWS::Glue::Workflow
+    DependsOn: GlueServiceRole
+    Properties: 
+      Description: AWS Glue Workflow for ETL job trigger
+      Name: GlueETLWorkflow
+
+  # AWS Glue trigger for ETL crawlers
+  GlueTriggerSchedule1:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties:
+      Description: AWS Glue trigger for source crawlers
+      Name: GlueTriggerSchedule1
+      StartOnCreation: True
+      Type: SCHEDULED
+      Actions: 
+        - JobName: !Ref GlueJobETLWorklfowStart
+        #### ADD OTHER SOURCE CRAWLERS HERE ####
+        #### ADD OTHER SOURCE CRAWLERS HERE ####
+        #### ADD OTHER SOURCE CRAWLERS HERE ####
+      Schedule: cron(0 2 * * ? *)
+      WorkflowName: !Ref GlueETLWorkflow
+
+  # AWS Glue trigger for ETL Jobs source-to-s3raw
+  GlueTriggerConditional2:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties:
+      Description: AWS Glue trigger for ETL Jobs source-to-s3raw
+      Name: GlueTriggerConditional2
+      StartOnCreation: True
+      Type: CONDITIONAL
+      Actions: 
+        - CrawlerName: !Ref GlueSourceMainDBCrawler
+      Predicate:
+        Logical: AND 
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: !Ref GlueJobETLWorklfowStart
+            State: SUCCEEDED
+      WorkflowName: !Ref GlueETLWorkflow
+
+  # AWS Glue trigger for ETL Jobs source-to-s3raw
+  GlueTriggerConditional3:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties:
+      Description: AWS Glue trigger for ETL Jobs source-to-s3raw
+      Name: GlueTriggerConditional3
+      StartOnCreation: True
+      Type: CONDITIONAL
+      Actions: 
+        - JobName: !Ref GlueJobSourceStagingUsers
+        - JobName: !Ref GlueJobSourceStagingInterests
+      Predicate:
+        Logical: AND 
+        Conditions:
+          - LogicalOperator: EQUALS
+            CrawlerName: !Ref GlueSourceMainDBCrawler
+            CrawlState: SUCCEEDED
+      WorkflowName: !Ref GlueETLWorkflow
+  
+  # AWS Glue trigger for ETL s3raw crawler
+  GlueTriggerConditional4:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties: 
+      Description: AWS Glue trigger for s3raw crawlers
+      Name: GlueTriggerConditional4
+      StartOnCreation: True
+      Type: CONDITIONAL
+      Actions:
+        - CrawlerName: !Ref GlueStagingS3Crawler
+      Predicate:
+        Logical: AND
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: !Ref GlueJobSourceStagingUsers
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: !Ref GlueJobSourceStagingInterests
+            State: SUCCEEDED
+      WorkflowName: !Ref GlueETLWorkflow
+  
+  # AWS Glue trigger for ETL Jobs s3raw-to-redshift
+  GlueTriggerConditional5:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties: 
+      Description: AWS Glue trigger for ETL Jobs s3raw-to-redshift
+      Name: GlueTriggerConditional5
+      StartOnCreation: True
+      Type: CONDITIONAL
+      Actions:
+        - JobName: !Ref GlueJobStagingWarehouseUsers
+        - JobName: !Ref GlueJobStagingWarehouseInterests
+      Predicate:
+        Logical: AND
+        Conditions:
+          - LogicalOperator: EQUALS
+            CrawlerName: !Ref GlueStagingS3Crawler
+            CrawlState: SUCCEEDED
+      WorkflowName: !Ref GlueETLWorkflow
+
+  # AWS Glue trigger for ETL s3raw crawler
+  GlueTriggerConditional6:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties: 
+      Description: AWS Glue trigger for s3raw crawlers
+      Name: GlueTriggerConditional6
+      StartOnCreation: True
+      Type: CONDITIONAL
+      Actions:
+        - CrawlerName: !Ref GlueDestinationRedshiftDWCrawler
+      Predicate:
+        Logical: AND
+        Conditions:
+          - LogicalOperator: EQUALS
+            JobName: !Ref GlueJobStagingWarehouseUsers
+            State: SUCCEEDED
+          - LogicalOperator: EQUALS
+            JobName: !Ref GlueJobStagingWarehouseInterests
+            State: SUCCEEDED
+      WorkflowName: !Ref GlueETLWorkflow
+
+  # AWS Glue trigger for ETL Jobs s3raw-to-redshift
+  GlueTriggerConditional7:
+    Type: AWS::Glue::Trigger
+    DependsOn: GlueServiceRole
+    Properties: 
+      Description: AWS Glue trigger for ETL Jobs s3raw-to-redshift
+      Name: GlueTriggerConditional7
+      StartOnCreation: True
+      Type: CONDITIONAL
+      Actions:
+        - JobName: !Ref GlueJobETLWorkflowEnd
+      Predicate:
+        Logical: AND
+        Conditions:
+          - LogicalOperator: EQUALS
+            CrawlerName: !Ref GlueDestinationRedshiftDWCrawler
+            CrawlState: SUCCEEDED
+      WorkflowName: !Ref GlueETLWorkflow
