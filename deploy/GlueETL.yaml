@@ -393,7 +393,7 @@ Resources:
       Schedule: cron(0 2 * * ? *)
       WorkflowName: !Ref GlueETLWorkflow
 
-  # AWS Glue trigger for ETL Jobs source-to-s3raw
+  # AWS Glue trigger for ETL Jobs source-to-s3staging
   GlueTriggerConditional2:
     Type: AWS::Glue::Trigger
     DependsOn: GlueServiceRole
@@ -412,7 +412,7 @@ Resources:
             State: SUCCEEDED
       WorkflowName: !Ref GlueETLWorkflow
 
-  # AWS Glue trigger for ETL Jobs source-to-s3raw
+  # AWS Glue trigger for ETL Jobs source-to-staging
   GlueTriggerConditional3:
     Type: AWS::Glue::Trigger
     DependsOn: GlueServiceRole
@@ -432,7 +432,7 @@ Resources:
             CrawlState: SUCCEEDED
       WorkflowName: !Ref GlueETLWorkflow
   
-  # AWS Glue trigger for ETL s3raw crawler
+  # AWS Glue trigger for ETL s3staging crawler
   GlueTriggerConditional4:
     Type: AWS::Glue::Trigger
     DependsOn: GlueServiceRole
@@ -454,7 +454,7 @@ Resources:
             State: SUCCEEDED
       WorkflowName: !Ref GlueETLWorkflow
   
-  # AWS Glue trigger for ETL Jobs s3raw-to-redshift
+  # AWS Glue trigger for ETL Jobs s3staging-to-redshift
   GlueTriggerConditional5:
     Type: AWS::Glue::Trigger
     DependsOn: GlueServiceRole
@@ -474,7 +474,7 @@ Resources:
             CrawlState: SUCCEEDED
       WorkflowName: !Ref GlueETLWorkflow
 
-  # AWS Glue trigger for ETL s3raw crawler
+  # AWS Glue trigger for ETL s3staging crawler
   GlueTriggerConditional6:
     Type: AWS::Glue::Trigger
     DependsOn: GlueServiceRole
@@ -496,7 +496,7 @@ Resources:
             State: SUCCEEDED
       WorkflowName: !Ref GlueETLWorkflow
 
-  # AWS Glue trigger for ETL Jobs s3raw-to-redshift
+  # AWS Glue trigger for ETL Jobs s3staging-to-redshift
   GlueTriggerConditional7:
     Type: AWS::Glue::Trigger
     DependsOn: GlueServiceRole
